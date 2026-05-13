@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Local browser dashboard for Clawdmeter.
-
-Run on the same machine where Claude Code is logged in, then open the
-served URL from Safari on an iPhone on the same Wi-Fi network.
-"""
+"""Local browser dashboard for Clawdmeter."""
 
 from __future__ import annotations
 
@@ -28,13 +24,26 @@ ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MODEL = "claude-3-5-haiku-latest"
 
 
+def auth_headers() -> dict[str, str]:
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if api_key:
+        return {"x-api-key": api_key.strip()}
+
+    token = load_access_token()
+    return {"authorization": f"Bearer {token}"}
+
+
 def load_access_token() -> str:
     env_token = os.environ.get("CLAUDE_ACCESS_TOKEN") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
     if env_token:
         return env_token.strip()
 
     if not CREDENTIALS_PATH.exists():
-        raise RuntimeError(f"Credentials file not found: {CREDENTIALS_PATH}")
+        raise RuntimeError(
+            "Claude Code credentials file was not found. On macOS, Claude Code stores credentials "
+            "in the macOS Keychain, not in ~/.claude/.credentials.json. Set ANTHROPIC_API_KEY in "
+            "this terminal, or run this server on Linux where Claude Code writes .credentials.json."
+        )
 
     data = json.loads(CREDENTIALS_PATH.read_text(encoding="utf-8"))
     token = find_token(data)
@@ -44,15 +53,8 @@ def load_access_token() -> str:
 
 
 def find_token(value: Any) -> str | None:
-    """Find a plausible OAuth access token in Claude Code credentials JSON."""
     if isinstance(value, dict):
-        preferred_keys = [
-            "accessToken",
-            "access_token",
-            "claudeAiOauth/accessToken",
-            "oauthAccessToken",
-            "token",
-        ]
+        preferred_keys = ["accessToken", "access_token", "claudeAiOauth/accessToken", "oauthAccessToken", "token"]
         for key in preferred_keys:
             candidate = value.get(key)
             if isinstance(candidate, str) and len(candidate) > 20:
@@ -66,9 +68,8 @@ def find_token(value: Any) -> str | None:
             found = find_token(child)
             if found:
                 return found
-    elif isinstance(value, str):
-        if looks_like_token(value):
-            return value
+    elif isinstance(value, str) and looks_like_token(value):
+        return value
     return None
 
 
@@ -82,9 +83,8 @@ def looks_like_token(value: str) -> bool:
 
 
 def fetch_usage() -> dict[str, Any]:
-    token = load_access_token()
     headers = {
-        "authorization": f"Bearer {token}",
+        **auth_headers(),
         "anthropic-version": ANTHROPIC_VERSION,
         "content-type": "application/json",
     }
@@ -134,7 +134,6 @@ def header_minutes(response: requests.Response, name: str) -> int | None:
     stripped = value.strip()
     try:
         numeric = float(stripped)
-        # Existing daemon payloads use minutes. Some API headers may use seconds.
         if numeric > 60 * 24 * 14:
             return round(numeric / 60)
         return round(numeric)
@@ -150,7 +149,7 @@ def header_minutes(response: requests.Response, name: str) -> int | None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ClawdmeterWeb/0.1"
+    server_version = "ClawdmeterWeb/0.2"
 
     def do_GET(self) -> None:
         if self.path == "/api/usage":
@@ -168,6 +167,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/manifest.webmanifest":
             self.send_static("manifest.webmanifest", "application/manifest+json; charset=utf-8")
             return
+        if self.path == "/favicon.ico":
+            self.send_response(204)
+            self.end_headers()
+            return
         self.send_error(404)
 
     def send_usage(self) -> None:
@@ -175,11 +178,8 @@ class Handler(BaseHTTPRequestHandler):
             payload = fetch_usage()
             status = 200
         except Exception as exc:
-            payload = {
-                "ok": False,
-                "error": str(exc),
-                "updatedAt": datetime.now(timezone.utc).isoformat(),
-            }
+            print(f"/api/usage failed: {exc}", file=sys.stderr)
+            payload = {"ok": False, "error": str(exc), "updatedAt": datetime.now(timezone.utc).isoformat()}
             status = 500
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
