@@ -10,10 +10,15 @@
 </head>
 <body>
   <main class="app-shell">
-    <section class="hero card">
-      <p class="eyebrow">Clawdmeter Web</p>
-      <h1>Claude Code Usage</h1>
-      <p class="subtitle">iPhone の Safari で見る簡易ダッシュボード</p>
+    <section class="screen hero-screen">
+      <div class="screen-chrome">
+        <span></span><span></span><span></span>
+      </div>
+      <div class="hero-copy">
+        <p class="eyebrow">Clawdmeter Web</p>
+        <h1>Claude<br>Code</h1>
+        <p class="subtitle">iPhone 横画面用<br>pixel dashboard</p>
+      </div>
       <div class="status-row">
         <span id="status-dot" class="status-dot waiting"></span>
         <span id="status-text">待機中</span>
@@ -22,7 +27,35 @@
       </div>
     </section>
 
-    <section class="meter card">
+    <section class="screen mascot-screen" aria-label="Clawd pixel mascot">
+      <div class="pixel-grid-bg"></div>
+      <svg class="clawd-pixel" viewBox="0 0 160 160" role="img" aria-label="Orange Clawd mascot" shape-rendering="crispEdges">
+        <rect width="160" height="160" fill="transparent"/>
+        <rect x="48" y="16" width="64" height="16" class="p orange-dark"/>
+        <rect x="32" y="32" width="96" height="16" class="p orange"/>
+        <rect x="24" y="48" width="112" height="16" class="p orange"/>
+        <rect x="16" y="64" width="128" height="16" class="p orange-light"/>
+        <rect x="16" y="80" width="128" height="16" class="p orange"/>
+        <rect x="24" y="96" width="112" height="16" class="p orange-dark"/>
+        <rect x="40" y="112" width="80" height="16" class="p orange"/>
+        <rect x="56" y="128" width="48" height="16" class="p orange-dark"/>
+        <rect x="32" y="40" width="16" height="16" class="p orange-dark"/>
+        <rect x="112" y="40" width="16" height="16" class="p orange-dark"/>
+        <rect x="48" y="64" width="16" height="16" class="p ink"/>
+        <rect x="96" y="64" width="16" height="16" class="p ink"/>
+        <rect x="64" y="88" width="32" height="16" class="p ink-soft"/>
+        <rect x="64" y="32" width="16" height="16" class="p cream"/>
+        <rect x="96" y="32" width="16" height="16" class="p cream"/>
+        <rect x="16" y="104" width="16" height="32" class="p accent"/>
+        <rect x="128" y="104" width="16" height="32" class="p accent"/>
+      </svg>
+      <div class="mascot-label">
+        <strong>CLAWD</strong>
+        <span>always on screen</span>
+      </div>
+    </section>
+
+    <section class="screen meter session-meter">
       <div class="meter-topline">
         <h2>Session</h2>
         <strong id="session-percent">0%</strong>
@@ -34,7 +67,7 @@
       </div>
     </section>
 
-    <section class="meter card">
+    <section class="screen meter weekly-meter">
       <div class="meter-topline">
         <h2>Weekly</h2>
         <strong id="weekly-percent">0%</strong>
@@ -47,7 +80,7 @@
     </section>
 
     <section class="actions">
-      <button id="refresh-button" type="button">今すぐ更新</button>
+      <button id="refresh-button" type="button">更新</button>
       <p id="error" class="error" hidden></p>
     </section>
   </main>
