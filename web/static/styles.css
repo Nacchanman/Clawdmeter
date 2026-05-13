@@ -6,7 +6,7 @@
   --text: #fff7e8;
   --muted: #b7aa94;
   --line: #5a5141;
-  --ok: #7be07d;
+  --ok: #7be08b;
   --warn: #ffd36e;
   --hot: #ff8f5f;
   --bad: #ff5f5f;
@@ -25,7 +25,7 @@ body {
   overflow: hidden;
   background:
     radial-gradient(circle at 12% 16%, rgba(214, 125, 93, 0.18), transparent 18rem),
-    radial-gradient(circle at 90% 82%, rgba(123, 224, 125, 0.12), transparent 22rem),
+    radial-gradient(circle at 90% 82%, rgba(123, 224, 139, 0.12), transparent 22rem),
     var(--bg);
   color: var(--text);
   font-family: "Press Start 2P", ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -84,6 +84,7 @@ body::after {
   inset: 8px;
   border: 2px dashed rgba(255, 211, 110, 0.14);
   pointer-events: none;
+  z-index: 0;
 }
 
 .hero-screen {
@@ -286,15 +287,23 @@ h1 {
 
 .meter {
   padding: 18px;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  align-content: stretch;
+  gap: 10px;
 }
 
 .session-meter { grid-column: 3 / 4; grid-row: 1 / 2; }
 .weekly-meter { grid-column: 3 / 4; grid-row: 2 / 3; }
 
+.meter-topline {
+  position: relative;
+  z-index: 1;
+  min-height: 0;
+}
+
 .meter-topline h2 {
+  flex: 0 0 auto;
   font-size: clamp(0.52rem, 1.35vw, 0.82rem);
   color: var(--muted);
   line-height: 1.5;
@@ -312,9 +321,15 @@ h1 {
 }
 
 .bar {
+  position: relative;
+  z-index: 2;
+  display: block;
+  width: 100%;
+  min-width: 0;
   height: clamp(20px, 3.5svh, 32px);
-  margin: 12px 0;
-  overflow: hidden;
+  min-height: 20px;
+  margin: 0;
+  overflow: visible;
   border: 4px solid #050505;
   border-radius: 0;
   background: #393832;
@@ -322,17 +337,23 @@ h1 {
 }
 
 .bar span {
+  position: relative;
+  z-index: 3;
   display: block;
+  min-width: 10px;
   width: 0%;
   height: 100%;
   border-radius: 0;
   background:
-    repeating-linear-gradient(90deg, rgba(255,255,255,0.17) 0 4px, transparent 4px 8px),
-    linear-gradient(90deg, var(--ok), var(--warn), var(--hot));
+    repeating-linear-gradient(90deg, rgba(255,255,255,0.18) 0 4px, transparent 4px 8px),
+    linear-gradient(90deg, var(--ok) 0%, var(--warn) 55%, var(--hot) 100%);
+  box-shadow: 0 0 12px rgba(255, 211, 110, 0.28);
   transition: width 240ms steps(10, end);
 }
 
 .meter-bottomline {
+  position: relative;
+  z-index: 1;
   color: var(--muted);
   font-size: clamp(0.46rem, 1.18vw, 0.72rem);
   line-height: 1.7;
@@ -408,13 +429,23 @@ button:disabled { opacity: 0.65; }
   .app-shell {
     gap: 8px;
     padding: calc(env(safe-area-inset-top) + 8px) calc(env(safe-area-inset-right) + 8px) calc(env(safe-area-inset-bottom) + 8px) calc(env(safe-area-inset-left) + 8px);
+    grid-template-columns: 0.95fr 0.82fr 1.28fr;
   }
   .hero-screen { padding: 16px; }
-  .meter { padding: 14px; }
+  .meter {
+    padding: 12px;
+    grid-template-rows: minmax(44px, 1fr) 26px auto;
+    gap: 8px;
+  }
+  .meter-topline { align-items: flex-start; }
+  .meter-topline h2 { font-size: clamp(0.42rem, 1.25vw, 0.56rem); padding-top: 6px; }
+  .meter-topline strong { font-size: clamp(1.9rem, 5.4vw, 3.25rem); line-height: 1; }
+  .bar { height: 26px; min-height: 26px; border-width: 3px; box-shadow: inset 0 0 0 2px rgba(255,255,255,0.10); }
+  .bar span { min-width: 14px; }
+  .meter-bottomline { font-size: clamp(0.4rem, 1.15vw, 0.56rem); }
   .subtitle { display: none; }
   .mascot-label span { display: none; }
   .actions { min-height: 34px; }
   button { padding: 6px 10px; }
   h1 { font-size: clamp(1.35rem, 4.1vw, 2.6rem); }
-  .meter-topline strong { font-size: clamp(2rem, 6.4vw, 4rem); }
 }
