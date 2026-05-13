@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Local browser dashboard for Clawdmeter."""
+"""Local browser dashboard for Clawdmeter.
+
+Default mode is free and local-only: it reads Claude Code session JSON files under
+~/.claude/sessions and estimates recent usage without calling Anthropic's API.
+"""
 
 from __future__ import annotations
 
@@ -8,20 +12,190 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-import requests
-
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
-CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
+CLAUDE_DIR = Path.home() / ".claude"
+SESSIONS_DIR = CLAUDE_DIR / "sessions"
+CREDENTIALS_PATH = CLAUDE_DIR / ".credentials.json"
 
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MODEL = "claude-3-5-haiku-latest"
+
+# These are only used for the free local estimate. They are not official limits.
+DEFAULT_FIVE_HOUR_TOKEN_BUDGET = int(os.environ.get("CLAWDMETER_5H_TOKEN_BUDGET", "200000"))
+DEFAULT_WEEKLY_TOKEN_BUDGET = int(os.environ.get("CLAWDMETER_WEEKLY_TOKEN_BUDGET", "1400000"))
+
+SERVER_MODE = "local"
+
+
+def fetch_usage() -> dict[str, Any]:
+    if SERVER_MODE == "api":
+        return fetch_usage_from_api()
+    return fetch_usage_from_local_sessions()
+
+
+def fetch_usage_from_local_sessions() -> dict[str, Any]:
+    if not SESSIONS_DIR.exists():
+        raise RuntimeError(f"Claude Code sessions directory not found: {SESSIONS_DIR}")
+
+    now = datetime.now(timezone.utc)
+    five_hours_ago = now - timedelta(hours=5)
+    seven_days_ago = now - timedelta(days=7)
+
+    five_hour_tokens = 0
+    weekly_tokens = 0
+    scanned_files = 0
+    matched_usage_objects = 0
+
+    for path in SESSIONS_DIR.rglob("*.json"):
+        scanned_files += 1
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+        for usage, timestamp in iter_usage_objects(data):
+            matched_usage_objects += 1
+            tokens = usage_token_total(usage)
+            if tokens <= 0:
+                continue
+            when = timestamp or file_mtime(path)
+            if when >= seven_days_ago:
+                weekly_tokens += tokens
+            if when >= five_hours_ago:
+                five_hour_tokens += tokens
+
+    session_percent = percent(five_hour_tokens, DEFAULT_FIVE_HOUR_TOKEN_BUDGET)
+    weekly_percent = percent(weekly_tokens, DEFAULT_WEEKLY_TOKEN_BUDGET)
+
+    return {
+        "ok": True,
+        "sessionPercent": session_percent,
+        "sessionResetMinutes": minutes_until_next_five_hour_window(now),
+        "weeklyPercent": weekly_percent,
+        "weeklyResetMinutes": None,
+        "status": f"local estimate · {matched_usage_objects} usage records",
+        "updatedAt": now.isoformat(),
+        "source": "local_sessions",
+        "debug": {
+            "scannedFiles": scanned_files,
+            "matchedUsageObjects": matched_usage_objects,
+            "fiveHourTokens": five_hour_tokens,
+            "weeklyTokens": weekly_tokens,
+            "fiveHourTokenBudget": DEFAULT_FIVE_HOUR_TOKEN_BUDGET,
+            "weeklyTokenBudget": DEFAULT_WEEKLY_TOKEN_BUDGET,
+        },
+    }
+
+
+def iter_usage_objects(value: Any, inherited_timestamp: datetime | None = None):
+    if isinstance(value, dict):
+        timestamp = parse_timestamp(value) or inherited_timestamp
+        usage = value.get("usage")
+        if isinstance(usage, dict):
+            yield usage, timestamp
+
+        # Some Claude Code builds may store usage fields directly on a message object.
+        if any(key in value for key in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")):
+            yield value, timestamp
+
+        for child in value.values():
+            yield from iter_usage_objects(child, timestamp)
+    elif isinstance(value, list):
+        for child in value:
+            yield from iter_usage_objects(child, inherited_timestamp)
+
+
+def parse_timestamp(value: dict[str, Any]) -> datetime | None:
+    for key in ("timestamp", "created_at", "createdAt", "time", "datetime", "date"):
+        raw = value.get(key)
+        if isinstance(raw, str):
+            parsed = parse_datetime(raw)
+            if parsed:
+                return parsed
+    return None
+
+
+def parse_datetime(raw: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def file_mtime(path: Path) -> datetime:
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+
+
+def usage_token_total(usage: dict[str, Any]) -> int:
+    total = 0
+    for key in (
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "inputTokens",
+        "outputTokens",
+        "cacheCreationInputTokens",
+        "cacheReadInputTokens",
+    ):
+        value = usage.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int | float):
+            total += int(value)
+    return total
+
+
+def percent(used: int, budget: int) -> int:
+    if budget <= 0:
+        return 0
+    return max(0, min(100, round((used / budget) * 100)))
+
+
+def minutes_until_next_five_hour_window(now: datetime) -> int:
+    # A rough countdown for the rolling 5-hour local estimate.
+    next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    return max(1, round((next_hour - now).total_seconds() / 60))
+
+
+def fetch_usage_from_api() -> dict[str, Any]:
+    import requests
+
+    headers = {
+        **auth_headers(),
+        "anthropic-version": ANTHROPIC_VERSION,
+        "content-type": "application/json",
+    }
+    payload = {
+        "model": os.environ.get("CLAWDMETER_MODEL", DEFAULT_MODEL),
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "ping"}],
+    }
+
+    response = requests.post(ANTHROPIC_URL, headers=headers, json=payload, timeout=20)
+    if not 200 <= response.status_code < 300:
+        raise RuntimeError(f"Anthropic API returned HTTP {response.status_code}: {response.text[:300]}")
+
+    return {
+        "ok": True,
+        "sessionPercent": header_number(response, "anthropic-ratelimit-unified-5h-utilization", 0),
+        "sessionResetMinutes": header_minutes(response, "anthropic-ratelimit-unified-5h-reset"),
+        "weeklyPercent": header_number(response, "anthropic-ratelimit-unified-7d-utilization", 0),
+        "weeklyResetMinutes": header_minutes(response, "anthropic-ratelimit-unified-7d-reset"),
+        "status": "api",
+        "updatedAt": datetime.now(timezone.utc).isoformat(),
+        "source": "anthropic_api",
+    }
 
 
 def auth_headers() -> dict[str, str]:
@@ -40,9 +214,9 @@ def load_access_token() -> str:
 
     if not CREDENTIALS_PATH.exists():
         raise RuntimeError(
-            "Claude Code credentials file was not found. On macOS, Claude Code stores credentials "
-            "in the macOS Keychain, not in ~/.claude/.credentials.json. Set ANTHROPIC_API_KEY in "
-            "this terminal, or run this server on Linux where Claude Code writes .credentials.json."
+            "Claude Code credentials file was not found. On macOS, Claude Code often stores credentials "
+            "in the macOS Keychain, not in ~/.claude/.credentials.json. Use default --mode local for free "
+            "local estimates, or set ANTHROPIC_API_KEY and run --mode api."
         )
 
     data = json.loads(CREDENTIALS_PATH.read_text(encoding="utf-8"))
@@ -82,41 +256,14 @@ def looks_like_token(value: str) -> bool:
     return bool(re.search(r"[A-Za-z0-9_-]{30,}", value))
 
 
-def fetch_usage() -> dict[str, Any]:
-    headers = {
-        **auth_headers(),
-        "anthropic-version": ANTHROPIC_VERSION,
-        "content-type": "application/json",
-    }
-    payload = {
-        "model": os.environ.get("CLAWDMETER_MODEL", DEFAULT_MODEL),
-        "max_tokens": 1,
-        "messages": [{"role": "user", "content": "ping"}],
-    }
-
-    response = requests.post(ANTHROPIC_URL, headers=headers, json=payload, timeout=20)
-    if not 200 <= response.status_code < 300:
-        raise RuntimeError(f"Anthropic API returned HTTP {response.status_code}: {response.text[:300]}")
-
-    return {
-        "ok": True,
-        "sessionPercent": header_number(response, "anthropic-ratelimit-unified-5h-utilization", 0),
-        "sessionResetMinutes": header_minutes(response, "anthropic-ratelimit-unified-5h-reset"),
-        "weeklyPercent": header_number(response, "anthropic-ratelimit-unified-7d-utilization", 0),
-        "weeklyResetMinutes": header_minutes(response, "anthropic-ratelimit-unified-7d-reset"),
-        "status": "allowed",
-        "updatedAt": datetime.now(timezone.utc).isoformat(),
-    }
-
-
-def header_value(response: requests.Response, name: str) -> str | None:
+def header_value(response: Any, name: str) -> str | None:
     for key, value in response.headers.items():
         if key.lower() == name.lower():
             return value
     return None
 
 
-def header_number(response: requests.Response, name: str, default: int) -> int:
+def header_number(response: Any, name: str, default: int) -> int:
     value = header_value(response, name)
     if value is None:
         return default
@@ -126,7 +273,7 @@ def header_number(response: requests.Response, name: str, default: int) -> int:
         return default
 
 
-def header_minutes(response: requests.Response, name: str) -> int | None:
+def header_minutes(response: Any, name: str) -> int | None:
     value = header_value(response, name)
     if not value:
         return None
@@ -149,7 +296,7 @@ def header_minutes(response: requests.Response, name: str) -> int | None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ClawdmeterWeb/0.2"
+    server_version = "ClawdmeterWeb/0.3"
 
     def do_GET(self) -> None:
         if self.path == "/api/usage":
@@ -204,13 +351,20 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    global SERVER_MODE
+
     parser = argparse.ArgumentParser(description="Run the Clawdmeter browser dashboard.")
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind. Use 0.0.0.0 for iPhone access on LAN.")
     parser.add_argument("--port", default=8787, type=int, help="Port to bind.")
+    parser.add_argument("--mode", choices=["local", "api"], default=os.environ.get("CLAWDMETER_MODE", "local"), help="local is free and reads Claude Code session files; api calls Anthropic API.")
     args = parser.parse_args()
+    SERVER_MODE = args.mode
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"Clawdmeter Web is running at http://{args.host}:{args.port}")
+    print(f"Mode: {SERVER_MODE}")
+    if SERVER_MODE == "local":
+        print("Using free local estimate from ~/.claude/sessions. No Anthropic API call will be made.")
     print("Press Ctrl+C to stop.")
     try:
         httpd.serve_forever()
