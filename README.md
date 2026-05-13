@@ -1,183 +1,211 @@
 # Clawdmeter
 
-A small ESP32 dashboard I made for my desk to keep an eye on Claude Code usage.
+Claude Code の利用状況を机の上で確認するための、小型 ESP32 ダッシュボードです。
 
-It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16) and pairs with my laptop over Bluetooth, and the splash screen plays pixel-art Clawd animations that get
-busier when your usage rate climbs. The two side buttons send Space and
-Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
+[Waveshare ESP32-S3-Touch-AMOLED-2.16](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16) 上で動作し、PC とは Bluetooth で接続します。スプラッシュ画面ではピクセルアートの Clawd アニメーションが再生され、利用率が上がるほど忙しそうなアニメーションに切り替わります。
 
-|              Usage meter              |              Clawd animation screen              |
-| :-----------------------------------: | :----------------------------------------------: |
+左右の物理ボタンは BLE HID キーボードとして動作し、Claude Code の音声入力やモード切り替えに使えるショートカットを送信します。
+
+|              使用量メーター              |              Clawd アニメーション画面              |
+| :--------------------------------------: | :-----------------------------------------------: |
 | ![Usage meter](assets/demo.jpeg) | ![Clawd animation screen](assets/demo.gif) |
 
-The Clawd animations come from [claudepix](https://claudepix.vercel.app), [@amaanbuilds](https://x.com/amaanbuilds)'s library of pixel-art Clawd sprites, check it out, it's lovely.
+Clawd アニメーションは [claudepix](https://claudepix.vercel.app) から取得しています。これは [@amaanbuilds](https://x.com/amaanbuilds) によるピクセルアート Clawd スプライトのライブラリです。
 
-## Screens
+## 画面
 
-The device boots into the splash and stays there until you press the middle (PWR) button, which cycles between Usage and Bluetooth. Tap the screen anywhere (except the Reset zone on the Bluetooth screen) to flip back to the splash; tap again to dismiss it.
+起動後はスプラッシュ画面が表示されます。中央の PWR ボタンを押すと、Usage 画面と Bluetooth 画面を切り替えられます。画面をタップするとスプラッシュ表示に戻り、もう一度タップするとスプラッシュを閉じます。ただし Bluetooth 画面の Reset 領域は除きます。
 
 |              Splash               |              Usage              |                Bluetooth                |
 | :-------------------------------: | :-----------------------------: | :-------------------------------------: |
 | ![Splash](screenshots/splash.png) | ![Usage](screenshots/usage.png) | ![Bluetooth](screenshots/bluetooth.png) |
-|   Splash; touch-toggle anytime    | Session and weekly utilization  |    Connection status and bond reset     |
+| いつでもタッチで表示切り替え | セッション・週間の利用率 | 接続状態とペアリング情報のリセット |
 
-While the splash is up, the middle button cycles animations instead of screens. The firmware also auto-rotates every 20 s within the current usage-rate group, so a long stretch on the splash isn't just one Clawd on loop.
+スプラッシュ表示中は、中央ボタンで画面ではなくアニメーションを切り替えます。また、ファームウェアは現在の利用率グループ内で 20 秒ごとにアニメーションを自動ローテーションします。
 
-## Hardware
+## 必要なハードウェア
 
-- [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16) — ESP32-S3R8, 2.16" 480×480 AMOLED (CO5300 QSPI), CST9220 cap touch, AXP2101 PMU + Li-Po battery, QMI8658 IMU
-- USB-C cable for flashing firmware and charging
-- 3.7V Li-Po battery (MX1.25 2-pin connector, optional)
+- [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16)
+  - ESP32-S3R8
+  - 2.16 インチ 480×480 AMOLED（CO5300 QSPI）
+  - CST9220 静電容量式タッチ
+  - AXP2101 PMU + Li-Po バッテリー対応
+  - QMI8658 IMU
+- ファームウェア書き込み・充電用 USB-C ケーブル
+- 3.7V Li-Po バッテリー（MX1.25 2 ピンコネクタ、任意）
 
-## Prerequisites
+## 前提条件
 
-- Linux (tested on Ubuntu)
+- Linux（Ubuntu で動作確認）
 - [PlatformIO CLI](https://docs.platformio.org/en/latest/core/installation/index.html)
-- `curl`, `bluetoothctl`, `busctl` (BlueZ Bluetooth stack)
-- Claude Code with an active subscription
+- `curl`, `bluetoothctl`, `busctl`（BlueZ Bluetooth スタック）
+- 有効な Claude Code サブスクリプション
 
-## MacOS support
+## macOS 対応について
 
-MacOS is fully supported, that is as soon as you prompt it and create a pull request for it!
+現状は Linux 前提です。
 
-I run Linux myself so it's harder for me to test this but anyone who wants MacOS support is welcome to contribute.
+macOS 対応は未整備ですが、対応したい場合は Pull Request を歓迎します。作者の環境が Linux のため、macOS でのテストは難しい状態です。
 
-## Flash the firmware
+## ファームウェアを書き込む
+
+ESP32 ボードを USB-C で接続してから、以下を実行します。
 
 ```bash
 cd firmware
 pio run -t upload --upload-port /dev/ttyACM0
 ```
 
-## Bluetooth pairing
+環境によっては `/dev/ttyACM0` ではなく別のポート名になることがあります。その場合は、接続されているシリアルポートを確認して読み替えてください。
 
-After flashing, the device advertises as "Claude Controller". Pair it once:
+## Bluetooth ペアリング
+
+書き込み後、デバイスは `Claude Controller` という名前でアドバタイズされます。最初に一度だけペアリングします。
 
 ```bash
-# Scan for the device
+# デバイスをスキャン
 bluetoothctl scan le
 
-# When "Claude Controller" appears, pair and trust it
-bluetoothctl pair F4:12:FA:C0:8F:E5    # use your device's MAC
+# "Claude Controller" が表示されたら、ペアリングして信頼済みにする
+bluetoothctl pair F4:12:FA:C0:8F:E5    # 自分のデバイスの MAC アドレスに置き換える
 bluetoothctl trust F4:12:FA:C0:8F:E5
 ```
 
-The MAC address is shown on the Bluetooth screen — press the middle (PWR) button to cycle to it.
+MAC アドレスは Bluetooth 画面に表示されます。中央の PWR ボタンを押して Bluetooth 画面に切り替えて確認してください。
 
-## Install the daemon
+## daemon をインストールする
 
-The daemon polls your Claude usage every 60 seconds and sends it to the display over BLE.
+daemon は 60 秒ごとに Claude の利用状況を取得し、BLE 経由でディスプレイに送信します。
 
 ```bash
 ./install.sh
 systemctl --user start claude-usage-daemon
 ```
 
-Check status: `systemctl --user status claude-usage-daemon`
+状態確認:
 
-View logs: `journalctl --user -u claude-usage-daemon -f`
+```bash
+systemctl --user status claude-usage-daemon
+```
 
-## How it works
+ログ確認:
 
-1. The daemon reads your Claude Code OAuth token from `~/.claude/.credentials.json`.
-2. It makes a minimal API call to `api.anthropic.com/v1/messages` — one token of Haiku, basically free.
-3. The usage numbers come straight out of the response headers (`anthropic-ratelimit-unified-5h-utilization` and friends).
-4. The daemon connects to the ESP32 over BLE and writes a JSON payload to the GATT RX characteristic.
-5. The firmware parses it and updates the LVGL dashboard.
-6. The firmware also tracks the rate of change of session % over a 5-minute window and picks splash animations from the matching mood group.
-7. The two side buttons are independent of all of this — they send Space and Shift+Tab as BLE HID keyboard input to the paired host directly.
+```bash
+journalctl --user -u claude-usage-daemon -f
+```
 
-## Physical buttons
+## 仕組み
 
-The board has three side buttons. Left and right do the same thing on every screen; the middle button is screen-aware.
+1. daemon が `~/.claude/.credentials.json` から Claude Code の OAuth トークンを読み込みます。
+2. `api.anthropic.com/v1/messages` に最小限の API リクエストを送ります。
+3. 使用量はレスポンスヘッダーから取得します。
+   - `anthropic-ratelimit-unified-5h-utilization`
+   - そのほか関連する rate limit ヘッダー
+4. daemon が ESP32 に BLE で接続し、GATT RX characteristic に JSON ペイロードを書き込みます。
+5. ファームウェアが JSON を解析し、LVGL ダッシュボードを更新します。
+6. ファームウェアは 5 分間のセッション使用率の変化も見て、利用状況に合うスプラッシュアニメーションを選びます。
+7. 左右の物理ボタンはこの処理とは独立しており、ペアリング済みホストに BLE HID キーボード入力として Space と Shift+Tab を送信します。
 
-| Button           | GPIO         | Function                                                       |
-| ---------------- | ------------ | -------------------------------------------------------------- |
-| **Left**         | GPIO 0       | Hold to send Space (Claude Code voice-mode push-to-talk)       |
-| **Middle** (PWR) | AXP2101 PKEY | Cycle screens (Usage ↔ Bluetooth); on splash, cycle animations |
-| **Right**        | GPIO 18      | Press to send Shift+Tab (Claude Code mode toggle)              |
+## 物理ボタン
 
-Space and Shift+Tab go out as standard BLE HID keyboard reports, so they trigger in whatever window has focus on the paired host — not just Claude Code.
+ボードには 3 つのサイドボタンがあります。左右のボタンはどの画面でも同じ動作です。中央ボタンは表示中の画面によって動作が変わります。
 
-## BLE protocol
+| ボタン | GPIO | 機能 |
+| ------ | ---- | ---- |
+| **Left** | GPIO 0 | 長押しで Space を送信（Claude Code 音声モードの push-to-talk 用） |
+| **Middle**（PWR） | AXP2101 PKEY | Usage / Bluetooth 画面を切り替え。スプラッシュ表示中はアニメーション切り替え |
+| **Right** | GPIO 18 | Shift+Tab を送信（Claude Code のモード切り替え用） |
 
-The device advertises a custom GATT service alongside the standard HID keyboard service:
+Space と Shift+Tab は標準の BLE HID キーボード入力として送信されます。そのため Claude Code だけでなく、ペアリング先 PC で現在フォーカスされているウィンドウに入力されます。
+
+## BLE プロトコル
+
+デバイスは標準 HID キーボードサービスに加えて、独自の GATT サービスもアドバタイズします。
 
 |                            | UUID                                   |
 | -------------------------- | -------------------------------------- |
 | **Data Service**           | `4c41555a-4465-7669-6365-000000000001` |
-| RX Characteristic (write)  | `4c41555a-4465-7669-6365-000000000002` |
-| TX Characteristic (notify) | `4c41555a-4465-7669-6365-000000000003` |
+| RX Characteristic（write） | `4c41555a-4465-7669-6365-000000000002` |
+| TX Characteristic（notify）| `4c41555a-4465-7669-6365-000000000003` |
 | **HID Service**            | `00001812-0000-1000-8000-00805f9b34fb` |
 
-JSON payload format (written to RX):
+RX に書き込む JSON ペイロード例:
 
 ```json
 { "s": 45, "sr": 120, "w": 28, "wr": 7200, "st": "allowed", "ok": true }
 ```
 
-Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag.
+フィールドの意味:
 
-## Recompiling fonts
+| フィールド | 意味 |
+| ---------- | ---- |
+| `s` | セッション使用率（%） |
+| `sr` | セッションリセットまでの時間（分） |
+| `w` | 週間使用率（%） |
+| `wr` | 週間リセットまでの時間（分） |
+| `st` | ステータス |
+| `ok` | 成功フラグ |
 
-The `firmware/src/font_*.c` files are pre-compiled LVGL bitmap fonts. Sizes
-are roughly 1.9× larger than the Panlee 165 PPI panel this project started on,
-to match the 314 PPI of the 2.16" AMOLED.
+## フォントを再コンパイルする
+
+`firmware/src/font_*.c` は、あらかじめコンパイル済みの LVGL ビットマップフォントです。サイズは、このプロジェクトが当初使っていた Panlee 165 PPI パネルより約 1.9 倍大きく、2.16 インチ AMOLED の 314 PPI に合わせています。
+
+まず `lv_font_conv` をインストールします。
 
 ```bash
 npm install -g lv_font_conv
 ```
 
-Generate each one (one at a time — `lv_font_conv` doesn't like loop-driven invocations) with `--no-compress` (required for LVGL 9):
+各フォントを生成します。`lv_font_conv` はループ実行で問題が出ることがあるため、必要に応じて 1 つずつ実行してください。LVGL 9 では `--no-compress` が必要です。
 
 ```bash
-# Tiempos Text (titles, 56px)
+# Tiempos Text（タイトル、56px）
 lv_font_conv --font assets/TiemposText-400-Regular.otf -r 0x20-0x7E \
   --size 56 --format lvgl --bpp 4 --no-compress \
   -o firmware/src/font_tiempos_56.c --lv-include "lvgl.h"
 
-# Styrene B (large numbers 48, panel labels 28, small text 24, minimal 20)
+# Styrene B（大きな数字 48、パネルラベル 28、小テキスト 24、最小 20）
 for size in 48 28 24 20; do
   lv_font_conv --font assets/StyreneB-Regular.otf -r 0x20-0x7E \
     --size $size --format lvgl --bpp 4 --no-compress \
     -o firmware/src/font_styrene_${size}.c --lv-include "lvgl.h"
 done
 
-# DejaVu Sans Mono (32px, with spinner Unicode chars)
+# DejaVu Sans Mono（32px、スピナー用 Unicode 文字を含む）
 lv_font_conv --font assets/DejaVuSansMono.ttf \
   -r 0x20-0x7E,0xB7,0x2026,0x2722,0x2733,0x2736,0x273B,0x273D \
   --size 32 --format lvgl --bpp 4 --no-compress \
   -o firmware/src/font_mono_32.c --lv-include "lvgl.h"
 ```
 
-**Important:** `lv_font_conv` v1.5.3 outputs LVGL 8 format. Each generated file must be patched for LVGL 9 compatibility:
+**重要:** `lv_font_conv` v1.5.3 は LVGL 8 形式のコードを出力します。LVGL 9 で使うには、生成された各ファイルに以下の修正が必要です。
 
-1. Remove `#if LVGL_VERSION_MAJOR >= 8` guards around `font_dsc` and the font struct
-2. Remove the `.cache` field from `font_dsc`
-3. Add `.release_glyph = NULL`, `.kerning = 0`, `.static_bitmap = 0` to the font struct
-4. Add `.fallback = NULL`, `.user_data = NULL` to the font struct
+1. `font_dsc` とフォント構造体を囲む `#if LVGL_VERSION_MAJOR >= 8` ガードを削除する
+2. `font_dsc` から `.cache` フィールドを削除する
+3. フォント構造体に `.release_glyph = NULL`, `.kerning = 0`, `.static_bitmap = 0` を追加する
+4. フォント構造体に `.fallback = NULL`, `.user_data = NULL` を追加する
 
-Without these patches, fonts compile but render as invisible.
+この修正をしないと、コンパイルは通ってもフォントが表示されないことがあります。
 
-## Converting Lucide icons
+## Lucide アイコンを変換する
 
-The UI uses a small set of [Lucide](https://lucide.dev) icons (bluetooth + battery states) converted to RGB565 / RGB565A8 C arrays for LVGL.
+UI では [Lucide](https://lucide.dev) の一部アイコン（Bluetooth とバッテリー状態）を、LVGL 用の RGB565 / RGB565A8 C 配列に変換して使っています。
 
 ```bash
 node tools/png_to_lvgl.js assets/icon_bluetooth_48.png icon_bluetooth_data ICON_BLUETOOTH_WIDTH ICON_BLUETOOTH_HEIGHT
 ```
 
-Default tint is white (`0xFFFFFF`); Lucide PNGs ship as black-on-transparent and would render invisible against the dark UI without it. Pass `--no-tint` for pre-coloured artwork like the logo. Battery icons use RGB565A8 (alpha plane) so they blend cleanly over the splash; the rest are baked RGB565 over the panel colour. Paste the converter output into `firmware/src/icons.h`.
+デフォルトの tint は白（`0xFFFFFF`）です。Lucide の PNG は透過背景に黒で描かれているため、暗い UI 上ではそのままだと見えません。ロゴなど、すでに色が付いている画像には `--no-tint` を指定してください。
 
-## Splash animations
+バッテリーアイコンは RGB565A8（アルファプレーンあり）で、スプラッシュ画面上に自然に合成されます。そのほかのアイコンはパネル色の上に RGB565 として焼き込まれます。変換結果は `firmware/src/icons.h` に貼り付けます。
 
-The animations come from [claudepix.vercel.app](https://claudepix.vercel.app),
-a library of Clawd sprites. `tools/scrape_claudepix.js` evaluates the
-site's JavaScript in a Node VM to pull out frame data and palettes, then
-`tools/convert_to_c.js` turns everything into RGB565 C arrays and writes
-`firmware/src/splash_animations.h`.
+## スプラッシュアニメーション
 
-To re-pull (e.g. when the source library updates):
+アニメーションは [claudepix.vercel.app](https://claudepix.vercel.app) の Clawd スプライトライブラリから取得しています。
+
+`tools/scrape_claudepix.js` はサイトの JavaScript を Node VM 上で評価してフレームデータとパレットを取り出します。その後、`tools/convert_to_c.js` が RGB565 の C 配列に変換し、`firmware/src/splash_animations.h` を生成します。
+
+再取得する場合は以下を実行します。
 
 ```bash
 node tools/scrape_claudepix.js
@@ -185,14 +213,19 @@ node tools/convert_to_c.js
 pio run -d firmware -t upload
 ```
 
-See `tools/README.md` for details.
+詳細は `tools/README.md` を参照してください。
 
-## Credits
+## クレジット
 
-- Pixel-art Clawd animation by [@amaanbuilds](https://x.com/amaanbuilds), sourced from [claudepix.vercel.app](https://claudepix.vercel.app). Frame data and palettes scraped + converted by the tooling in `tools/`.
-- Lucide icon set ([lucide.dev](https://lucide.dev), MIT) for bluetooth and battery UI glyphs.
-- Anthropic brand fonts (Tiempos Text, Styrene B) — see licensing warning below.
+- Pixel-art Clawd animation: [@amaanbuilds](https://x.com/amaanbuilds)、取得元 [claudepix.vercel.app](https://claudepix.vercel.app)
+- フレームデータとパレットの取得・変換: `tools/` 以下のスクリプト
+- Lucide icon set: [lucide.dev](https://lucide.dev), MIT License
+- Anthropic brand fonts: Tiempos Text, Styrene B（下記のライセンス注意を参照）
 
-## Licensing gray area warning
+## ライセンス上の注意
 
-The software in this repository uses and adheres to the Anthropic brand guidelines and uses the same proprietary fonts that Anthropic has a licnese for but this software uses without permission as well as using assets from Anthropic such as the copyrighted Clawd mascot so even though the code in this repo is non-proprietary I will not license it myself under a copyleft license since this repo includes proprietary fonts and copyrighted assets. Please be aware of this if you fork or copy the code from this repo. **You have been warned!**
+このリポジトリには、Anthropic のブランドガイドラインに沿った表現、Anthropic がライセンスを持つプロプライエタリフォント、著作権のある Clawd マスコット由来の素材が含まれています。
+
+そのため、コード自体は非プロプライエタリであっても、このリポジトリ全体を copyleft ライセンスとして再配布することはしていません。Fork やコピーを行う場合は、含まれているフォントや画像素材の権利関係に注意してください。
+
+個人利用や学習目的で試す場合でも、公開配布・販売・再ブランド化を行う場合は、権利が明確な素材への差し替えを検討してください。
