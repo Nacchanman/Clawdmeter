@@ -10,6 +10,9 @@ const elements = {
   weeklyReset: document.getElementById('weekly-reset'),
   refreshButton: document.getElementById('refresh-button'),
   error: document.getElementById('error'),
+  mascotWrap: document.getElementById('mascot-wrap'),
+  mascotMode: document.getElementById('mascot-mode'),
+  mascotCaption: document.getElementById('mascot-caption'),
 };
 
 function clampPercent(value) {
@@ -42,6 +45,36 @@ function setStatus(kind, text) {
   elements.statusText.textContent = text;
 }
 
+function updateMascot(session, weekly) {
+  const score = Math.max(session, weekly);
+  const wrap = elements.mascotWrap;
+  if (!wrap) return;
+
+  wrap.classList.remove('mood-calm', 'mood-active', 'mood-busy', 'mood-hot', 'mood-max');
+
+  if (score < 25) {
+    wrap.classList.add('mood-calm');
+    elements.mascotMode.textContent = 'IDLE';
+    elements.mascotCaption.textContent = 'LOW USAGE';
+  } else if (score < 50) {
+    wrap.classList.add('mood-active');
+    elements.mascotMode.textContent = 'ACTIVE';
+    elements.mascotCaption.textContent = 'WARMING UP';
+  } else if (score < 75) {
+    wrap.classList.add('mood-busy');
+    elements.mascotMode.textContent = 'BUSY';
+    elements.mascotCaption.textContent = 'STEADY WORK';
+  } else if (score < 90) {
+    wrap.classList.add('mood-hot');
+    elements.mascotMode.textContent = 'HOT';
+    elements.mascotCaption.textContent = 'USAGE RISING';
+  } else {
+    wrap.classList.add('mood-max');
+    elements.mascotMode.textContent = 'MAX';
+    elements.mascotCaption.textContent = 'TAKE A BREAK';
+  }
+}
+
 function render(data) {
   const session = clampPercent(data.sessionPercent);
   const weekly = clampPercent(data.weeklyPercent);
@@ -55,14 +88,15 @@ function render(data) {
   elements.weeklyReset.textContent = formatMinutes(data.weeklyResetMinutes);
 
   elements.updatedAt.textContent = formatTime(data.updatedAt);
-  setStatus('ok', data.status || 'allowed');
+  setStatus('ok', data.status || 'LOCAL');
   elements.error.hidden = true;
+  updateMascot(session, weekly);
 }
 
 async function refresh() {
   elements.refreshButton.disabled = true;
-  elements.refreshButton.textContent = '更新中...';
-  setStatus('waiting', '更新中');
+  elements.refreshButton.textContent = 'UPDATING';
+  setStatus('waiting', 'UPDATING');
 
   try {
     const response = await fetch('/api/usage', { cache: 'no-store' });
@@ -72,12 +106,12 @@ async function refresh() {
     }
     render(data);
   } catch (error) {
-    setStatus('error', 'エラー');
+    setStatus('error', 'ERROR');
     elements.error.textContent = error.message;
     elements.error.hidden = false;
   } finally {
     elements.refreshButton.disabled = false;
-    elements.refreshButton.textContent = '今すぐ更新';
+    elements.refreshButton.textContent = 'UPDATE';
   }
 }
 
