@@ -31,7 +31,12 @@ CREDENTIALS_PATH = CLAUDE_DIR / ".credentials.json"
 
 ANTHROPIC_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com") + "/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
-DEFAULT_MODEL = os.environ.get("CLAWDMETER_MODEL", "claude-3-5-haiku-latest")
+DEFAULT_MODEL = os.environ.get("CLAWDMETER_MODEL", "claude-sonnet-4-6")
+FALLBACK_MODELS = [
+    DEFAULT_MODEL,
+    "claude-haiku-4-5",
+    "claude-sonnet-4-5",
+]
 
 # Only used by --mode local. These are not official Claude limits.
 DEFAULT_FIVE_HOUR_TOKEN_BUDGET = int(os.environ.get("CLAWDMETER_5H_TOKEN_BUDGET", "200000"))
@@ -68,15 +73,29 @@ def fetch_usage_from_anthropic(auth_header: dict[str, str], source: str) -> dict
         "anthropic-version": ANTHROPIC_VERSION,
         "content-type": "application/json",
     }
-    payload = {
-        "model": DEFAULT_MODEL,
-        "max_tokens": 1,
-        "messages": [{"role": "user", "content": "ping"}],
-    }
 
-    response = requests.post(ANTHROPIC_URL, headers=headers, json=payload, timeout=20)
-    if not 200 <= response.status_code < 300:
-        raise RuntimeError(f"Anthropic API returned HTTP {response.status_code}: {response.text[:300]}")
+    attempted_errors: list[str] = []
+    response = None
+    used_model = None
+    for model in unique_models(FALLBACK_MODELS):
+        payload = {
+            "model": model,
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "ping"}],
+        }
+        candidate = requests.post(ANTHROPIC_URL, headers=headers, json=payload, timeout=20)
+        if 200 <= candidate.status_code < 300:
+            response = candidate
+            used_model = model
+            break
+        attempted_errors.append(f"{model}: HTTP {candidate.status_code}: {candidate.text[:180]}")
+        # Only try fallback models for missing/unknown model errors. Auth and quota errors
+        # should be surfaced immediately because fallback models will not fix them.
+        if candidate.status_code != 404 or "model" not in candidate.text.lower():
+            raise RuntimeError(f"Anthropic API returned HTTP {candidate.status_code}: {candidate.text[:300]}")
+
+    if response is None:
+        raise RuntimeError("Anthropic API model lookup failed. Tried: " + " | ".join(attempted_errors))
 
     session_percent = first_header_number(response, [
         "anthropic-ratelimit-unified-5h-utilization",
@@ -106,9 +125,20 @@ def fetch_usage_from_anthropic(auth_header: dict[str, str], source: str) -> dict
         "source": source,
         "debug": {
             "mode": SERVER_MODE,
+            "model": used_model,
             "headerNames": sorted(str(k) for k in response.headers.keys() if str(k).lower().startswith("anthropic-ratelimit")),
         },
     }
+
+
+def unique_models(models: list[str]) -> list[str]:
+    seen = set()
+    result = []
+    for model in models:
+        if model and model not in seen:
+            result.append(model)
+            seen.add(model)
+    return result
 
 
 def load_claude_code_access_token() -> str:
