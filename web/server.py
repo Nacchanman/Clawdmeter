@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Local browser dashboard for Clawdmeter.
 
-Default mode is free and local-only: it reads Claude Code session JSON files under
-~/.claude/sessions and estimates recent usage without calling Anthropic's API.
+Default mode is free and local-only: it reads Claude Code transcript files under
+~/.claude/projects and ~/.claude/sessions and estimates recent usage without
+calling Anthropic's API.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
 CLAUDE_DIR = Path.home() / ".claude"
 SESSIONS_DIR = CLAUDE_DIR / "sessions"
+PROJECTS_DIR = CLAUDE_DIR / "projects"
 CREDENTIALS_PATH = CLAUDE_DIR / ".credentials.json"
 
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
@@ -37,12 +39,12 @@ SERVER_MODE = "local"
 def fetch_usage() -> dict[str, Any]:
     if SERVER_MODE == "api":
         return fetch_usage_from_api()
-    return fetch_usage_from_local_sessions()
+    return fetch_usage_from_local_files()
 
 
-def fetch_usage_from_local_sessions() -> dict[str, Any]:
-    if not SESSIONS_DIR.exists():
-        raise RuntimeError(f"Claude Code sessions directory not found: {SESSIONS_DIR}")
+def fetch_usage_from_local_files() -> dict[str, Any]:
+    if not CLAUDE_DIR.exists():
+        raise RuntimeError(f"Claude Code directory not found: {CLAUDE_DIR}")
 
     now = datetime.now(timezone.utc)
     five_hours_ago = now - timedelta(hours=5)
@@ -51,25 +53,24 @@ def fetch_usage_from_local_sessions() -> dict[str, Any]:
     five_hour_tokens = 0
     weekly_tokens = 0
     scanned_files = 0
+    parsed_records = 0
     matched_usage_objects = 0
+    scanned_roots = [str(path) for path in local_roots()]
 
-    for path in SESSIONS_DIR.rglob("*.json"):
+    for path in local_candidate_files():
         scanned_files += 1
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-
-        for usage, timestamp in iter_usage_objects(data):
-            matched_usage_objects += 1
-            tokens = usage_token_total(usage)
-            if tokens <= 0:
-                continue
-            when = timestamp or file_mtime(path)
-            if when >= seven_days_ago:
-                weekly_tokens += tokens
-            if when >= five_hours_ago:
-                five_hour_tokens += tokens
+        for record in read_json_records(path):
+            parsed_records += 1
+            for usage, timestamp in iter_usage_objects(record):
+                matched_usage_objects += 1
+                tokens = usage_token_total(usage)
+                if tokens <= 0:
+                    continue
+                when = timestamp or file_mtime(path)
+                if when >= seven_days_ago:
+                    weekly_tokens += tokens
+                if when >= five_hours_ago:
+                    five_hour_tokens += tokens
 
     session_percent = percent(five_hour_tokens, DEFAULT_FIVE_HOUR_TOKEN_BUDGET)
     weekly_percent = percent(weekly_tokens, DEFAULT_WEEKLY_TOKEN_BUDGET)
@@ -82,9 +83,11 @@ def fetch_usage_from_local_sessions() -> dict[str, Any]:
         "weeklyResetMinutes": None,
         "status": f"local estimate · {matched_usage_objects} usage records",
         "updatedAt": now.isoformat(),
-        "source": "local_sessions",
+        "source": "local_files",
         "debug": {
+            "scannedRoots": scanned_roots,
             "scannedFiles": scanned_files,
+            "parsedRecords": parsed_records,
             "matchedUsageObjects": matched_usage_objects,
             "fiveHourTokens": five_hour_tokens,
             "weeklyTokens": weekly_tokens,
@@ -94,12 +97,68 @@ def fetch_usage_from_local_sessions() -> dict[str, Any]:
     }
 
 
+def local_roots() -> list[Path]:
+    roots = []
+    for path in (SESSIONS_DIR, PROJECTS_DIR):
+        if path.exists():
+            roots.append(path)
+    return roots or [CLAUDE_DIR]
+
+
+def local_candidate_files() -> list[Path]:
+    candidates: list[Path] = []
+    for root in local_roots():
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.name.startswith("."):
+                continue
+            if path.suffix.lower() in (".json", ".jsonl", ".log") or path.stat().st_size < 20_000_000:
+                candidates.append(path)
+    return sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def read_json_records(path: Path):
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return
+
+    stripped = text.strip()
+    if not stripped:
+        return
+
+    # Whole-file JSON.
+    if stripped[0] in "[{":
+        try:
+            yield json.loads(stripped)
+            return
+        except Exception:
+            pass
+
+    # JSON Lines, which is how recent Claude Code builds often store transcripts.
+    for line in stripped.splitlines():
+        line = line.strip()
+        if not line or line[0] not in "[{":
+            continue
+        try:
+            yield json.loads(line)
+        except Exception:
+            continue
+
+
 def iter_usage_objects(value: Any, inherited_timestamp: datetime | None = None):
     if isinstance(value, dict):
         timestamp = parse_timestamp(value) or inherited_timestamp
         usage = value.get("usage")
         if isinstance(usage, dict):
             yield usage, timestamp
+
+        message = value.get("message")
+        if isinstance(message, dict):
+            message_usage = message.get("usage")
+            if isinstance(message_usage, dict):
+                yield message_usage, timestamp
 
         # Some Claude Code builds may store usage fields directly on a message object.
         if any(key in value for key in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")):
@@ -151,7 +210,7 @@ def usage_token_total(usage: dict[str, Any]) -> int:
         value = usage.get(key)
         if isinstance(value, bool):
             continue
-        if isinstance(value, int | float):
+        if isinstance(value, (int, float)):
             total += int(value)
     return total
 
@@ -296,7 +355,7 @@ def header_minutes(response: Any, name: str) -> int | None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ClawdmeterWeb/0.3"
+    server_version = "ClawdmeterWeb/0.4"
 
     def do_GET(self) -> None:
         if self.path == "/api/usage":
@@ -356,7 +415,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the Clawdmeter browser dashboard.")
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind. Use 0.0.0.0 for iPhone access on LAN.")
     parser.add_argument("--port", default=8787, type=int, help="Port to bind.")
-    parser.add_argument("--mode", choices=["local", "api"], default=os.environ.get("CLAWDMETER_MODE", "local"), help="local is free and reads Claude Code session files; api calls Anthropic API.")
+    parser.add_argument("--mode", choices=["local", "api"], default=os.environ.get("CLAWDMETER_MODE", "local"), help="local is free and reads Claude Code transcript files; api calls Anthropic API.")
     args = parser.parse_args()
     SERVER_MODE = args.mode
 
@@ -364,7 +423,7 @@ def main() -> None:
     print(f"Clawdmeter Web is running at http://{args.host}:{args.port}")
     print(f"Mode: {SERVER_MODE}")
     if SERVER_MODE == "local":
-        print("Using free local estimate from ~/.claude/sessions. No Anthropic API call will be made.")
+        print("Using free local estimate from ~/.claude/projects and ~/.claude/sessions. No Anthropic API call will be made.")
     print("Press Ctrl+C to stop.")
     try:
         httpd.serve_forever()
