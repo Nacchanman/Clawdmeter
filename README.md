@@ -1,6 +1,32 @@
 # Clawdmeter
 
-Claude Code の利用状況を机の上で確認するための、小型 ESP32 ダッシュボードです。
+Claude Code の利用状況を確認するためのダッシュボードです。
+
+この Fork には、元の ESP32 版に加えて、iPhone の Safari などのブラウザから使える **Web 版ダッシュボード** も追加しています。
+
+## 使い方の選択肢
+
+### 1. Web 版: iPhone のブラウザで見る
+
+ESP32 ボードや iOS アプリを作らず、iPhone の Safari で表示するだけならこちらを使います。
+
+```bash
+cd web
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python server.py --host 0.0.0.0 --port 8787
+```
+
+PC と iPhone を同じ Wi-Fi に接続し、iPhone の Safari で以下を開きます。
+
+```text
+http://PCのIPアドレス:8787
+```
+
+詳しい手順は [`web/README.md`](web/README.md) を参照してください。
+
+### 2. ESP32 版: 専用ハードで動かす
 
 [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16) 上で動作し、PC とは Bluetooth で接続します。スプラッシュ画面ではピクセルアートの Clawd アニメーションが再生され、利用率が上がるほど忙しそうなアニメーションに切り替わります。
 
