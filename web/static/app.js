@@ -15,6 +15,8 @@ const elements = {
   mascotCaption: document.getElementById('mascot-caption'),
 };
 
+const REFRESH_INTERVAL_MS = 10_000;
+
 function clampPercent(value) {
   const number = Number(value || 0);
   return Math.max(0, Math.min(100, Math.round(number)));
@@ -117,4 +119,4 @@ async function refresh() {
 
 elements.refreshButton.addEventListener('click', refresh);
 refresh();
-setInterval(refresh, 60_000);
+setInterval(refresh, REFRESH_INTERVAL_MS);
