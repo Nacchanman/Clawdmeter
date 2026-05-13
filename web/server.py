@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Local browser dashboard for Clawdmeter.
 
-Default mode is free and local-only: it reads Claude Code transcript files under
-~/.claude/projects and ~/.claude/sessions and estimates recent usage without
-calling Anthropic's API.
+The default `official` mode preserves the original Clawdmeter idea: it asks
+Anthropic for Claude Code account rate-limit headers using Claude Code's own
+OAuth credential, then shows those official utilization percentages in the
+browser. The old local transcript estimate remains available as `--mode local`,
+but it is intentionally opt-in because it cannot match Claude's real limits.
 """
 
 from __future__ import annotations
@@ -11,7 +13,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import re
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,26 +24,201 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
-CLAUDE_DIR = Path.home() / ".claude"
+CLAUDE_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
 SESSIONS_DIR = CLAUDE_DIR / "sessions"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 CREDENTIALS_PATH = CLAUDE_DIR / ".credentials.json"
 
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com") + "/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
-DEFAULT_MODEL = "claude-3-5-haiku-latest"
+DEFAULT_MODEL = os.environ.get("CLAWDMETER_MODEL", "claude-3-5-haiku-latest")
 
-# These are only used for the free local estimate. They are not official limits.
+# Only used by --mode local. These are not official Claude limits.
 DEFAULT_FIVE_HOUR_TOKEN_BUDGET = int(os.environ.get("CLAWDMETER_5H_TOKEN_BUDGET", "200000"))
 DEFAULT_WEEKLY_TOKEN_BUDGET = int(os.environ.get("CLAWDMETER_WEEKLY_TOKEN_BUDGET", "1400000"))
 
-SERVER_MODE = "local"
+SERVER_MODE = "official"
 
 
 def fetch_usage() -> dict[str, Any]:
+    if SERVER_MODE == "official":
+        return fetch_usage_from_claude_code_oauth()
     if SERVER_MODE == "api":
-        return fetch_usage_from_api()
+        return fetch_usage_from_api_key()
     return fetch_usage_from_local_files()
+
+
+def fetch_usage_from_claude_code_oauth() -> dict[str, Any]:
+    token = load_claude_code_access_token()
+    return fetch_usage_from_anthropic({"authorization": f"Bearer {token}"}, source="claude_code_oauth")
+
+
+def fetch_usage_from_api_key() -> dict[str, Any]:
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set. Use --mode official for Claude Code OAuth, or set ANTHROPIC_API_KEY for --mode api.")
+    return fetch_usage_from_anthropic({"x-api-key": api_key.strip()}, source="anthropic_api_key")
+
+
+def fetch_usage_from_anthropic(auth_header: dict[str, str], source: str) -> dict[str, Any]:
+    import requests
+
+    headers = {
+        **auth_header,
+        "anthropic-version": ANTHROPIC_VERSION,
+        "content-type": "application/json",
+    }
+    payload = {
+        "model": DEFAULT_MODEL,
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "ping"}],
+    }
+
+    response = requests.post(ANTHROPIC_URL, headers=headers, json=payload, timeout=20)
+    if not 200 <= response.status_code < 300:
+        raise RuntimeError(f"Anthropic API returned HTTP {response.status_code}: {response.text[:300]}")
+
+    session_percent = first_header_number(response, [
+        "anthropic-ratelimit-unified-5h-utilization",
+        "anthropic-ratelimit-5h-utilization",
+        "anthropic-ratelimit-input-tokens-utilization",
+    ], 0)
+    weekly_percent = first_header_number(response, [
+        "anthropic-ratelimit-unified-7d-utilization",
+        "anthropic-ratelimit-7d-utilization",
+    ], 0)
+
+    return {
+        "ok": True,
+        "sessionPercent": session_percent,
+        "sessionResetMinutes": first_header_minutes(response, [
+            "anthropic-ratelimit-unified-5h-reset",
+            "anthropic-ratelimit-5h-reset",
+            "anthropic-ratelimit-input-tokens-reset",
+        ]),
+        "weeklyPercent": weekly_percent,
+        "weeklyResetMinutes": first_header_minutes(response, [
+            "anthropic-ratelimit-unified-7d-reset",
+            "anthropic-ratelimit-7d-reset",
+        ]),
+        "status": "official rate limit",
+        "updatedAt": datetime.now(timezone.utc).isoformat(),
+        "source": source,
+        "debug": {
+            "mode": SERVER_MODE,
+            "headerNames": sorted(str(k) for k in response.headers.keys() if str(k).lower().startswith("anthropic-ratelimit")),
+        },
+    }
+
+
+def load_claude_code_access_token() -> str:
+    # Explicit env vars always win. Useful if the Keychain cannot be read from this terminal.
+    for name in ("CLAUDE_ACCESS_TOKEN", "ANTHROPIC_AUTH_TOKEN"):
+        value = os.environ.get(name)
+        if value:
+            return value.strip()
+
+    # Linux / Windows Claude Code location, or custom CLAUDE_CONFIG_DIR.
+    if CREDENTIALS_PATH.exists():
+        data = json.loads(CREDENTIALS_PATH.read_text(encoding="utf-8"))
+        token = find_token(data)
+        if token:
+            return token
+
+    # macOS Claude Code location. This may show a Keychain permission prompt.
+    if platform.system() == "Darwin":
+        token = load_token_from_macos_keychain()
+        if token:
+            return token
+
+    raise RuntimeError(
+        "Could not read Claude Code OAuth credentials. Run `claude` and /login first. "
+        "On macOS, allow Keychain access if prompted. If Keychain access is blocked, run: "
+        "security find-generic-password -s 'Claude Code-credentials' -w"
+    )
+
+
+def load_token_from_macos_keychain() -> str | None:
+    # Known Claude Code service names. v2.x has used both names depending on version.
+    service_names = [
+        "Claude Code-credentials",
+        "Claude Code",
+        "claude-code-credentials",
+        "claude-code",
+    ]
+    for service in service_names:
+        secret = keychain_password(service)
+        if not secret:
+            continue
+        token = parse_secret_for_token(secret)
+        if token:
+            return token
+    return None
+
+
+def keychain_password(service: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["/usr/bin/security", "find-generic-password", "-s", service, "-w"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def parse_secret_for_token(secret: str) -> str | None:
+    if not secret:
+        return None
+    try:
+        data = json.loads(secret)
+        token = find_token(data)
+        if token:
+            return token
+    except Exception:
+        pass
+    if looks_like_token(secret):
+        return secret
+    return None
+
+
+def find_token(value: Any) -> str | None:
+    if isinstance(value, dict):
+        preferred_keys = [
+            "accessToken",
+            "access_token",
+            "claudeAiOauth/accessToken",
+            "oauthAccessToken",
+            "token",
+            "apiKey",
+            "api_key",
+        ]
+        for key in preferred_keys:
+            candidate = value.get(key)
+            if isinstance(candidate, str) and looks_like_token(candidate):
+                return candidate
+        for child in value.values():
+            found = find_token(child)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = find_token(child)
+            if found:
+                return found
+    elif isinstance(value, str) and looks_like_token(value):
+        return value
+    return None
+
+
+def looks_like_token(value: str) -> bool:
+    return len(value) >= 30 and bool(re.search(r"[A-Za-z0-9_\-.]{30,}", value))
 
 
 def fetch_usage_from_local_files() -> dict[str, Any]:
@@ -72,19 +251,17 @@ def fetch_usage_from_local_files() -> dict[str, Any]:
                 if when >= five_hours_ago:
                     five_hour_tokens += tokens
 
-    session_percent = percent(five_hour_tokens, DEFAULT_FIVE_HOUR_TOKEN_BUDGET)
-    weekly_percent = percent(weekly_tokens, DEFAULT_WEEKLY_TOKEN_BUDGET)
-
     return {
         "ok": True,
-        "sessionPercent": session_percent,
+        "sessionPercent": percent(five_hour_tokens, DEFAULT_FIVE_HOUR_TOKEN_BUDGET),
         "sessionResetMinutes": minutes_until_next_five_hour_window(now),
-        "weeklyPercent": weekly_percent,
+        "weeklyPercent": percent(weekly_tokens, DEFAULT_WEEKLY_TOKEN_BUDGET),
         "weeklyResetMinutes": None,
         "status": f"local estimate · {matched_usage_objects} usage records",
         "updatedAt": now.isoformat(),
-        "source": "local_files",
+        "source": "local_estimate",
         "debug": {
+            "mode": SERVER_MODE,
             "scannedRoots": scanned_roots,
             "scannedFiles": scanned_files,
             "parsedRecords": parsed_records,
@@ -109,9 +286,7 @@ def local_candidate_files() -> list[Path]:
     candidates: list[Path] = []
     for root in local_roots():
         for path in root.rglob("*"):
-            if not path.is_file():
-                continue
-            if path.name.startswith("."):
+            if not path.is_file() or path.name.startswith("."):
                 continue
             if path.suffix.lower() in (".json", ".jsonl", ".log") or path.stat().st_size < 20_000_000:
                 candidates.append(path)
@@ -123,20 +298,15 @@ def read_json_records(path: Path):
         text = path.read_text(encoding="utf-8", errors="replace")
     except Exception:
         return
-
     stripped = text.strip()
     if not stripped:
         return
-
-    # Whole-file JSON.
     if stripped[0] in "[{":
         try:
             yield json.loads(stripped)
             return
         except Exception:
             pass
-
-    # JSON Lines, which is how recent Claude Code builds often store transcripts.
     for line in stripped.splitlines():
         line = line.strip()
         if not line or line[0] not in "[{":
@@ -153,17 +323,13 @@ def iter_usage_objects(value: Any, inherited_timestamp: datetime | None = None):
         usage = value.get("usage")
         if isinstance(usage, dict):
             yield usage, timestamp
-
         message = value.get("message")
         if isinstance(message, dict):
             message_usage = message.get("usage")
             if isinstance(message_usage, dict):
                 yield message_usage, timestamp
-
-        # Some Claude Code builds may store usage fields directly on a message object.
         if any(key in value for key in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")):
             yield value, timestamp
-
         for child in value.values():
             yield from iter_usage_objects(child, timestamp)
     elif isinstance(value, list):
@@ -198,14 +364,8 @@ def file_mtime(path: Path) -> datetime:
 def usage_token_total(usage: dict[str, Any]) -> int:
     total = 0
     for key in (
-        "input_tokens",
-        "output_tokens",
-        "cache_creation_input_tokens",
-        "cache_read_input_tokens",
-        "inputTokens",
-        "outputTokens",
-        "cacheCreationInputTokens",
-        "cacheReadInputTokens",
+        "input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
+        "inputTokens", "outputTokens", "cacheCreationInputTokens", "cacheReadInputTokens",
     ):
         value = usage.get(key)
         if isinstance(value, bool):
@@ -222,97 +382,8 @@ def percent(used: int, budget: int) -> int:
 
 
 def minutes_until_next_five_hour_window(now: datetime) -> int:
-    # A rough countdown for the rolling 5-hour local estimate.
     next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
     return max(1, round((next_hour - now).total_seconds() / 60))
-
-
-def fetch_usage_from_api() -> dict[str, Any]:
-    import requests
-
-    headers = {
-        **auth_headers(),
-        "anthropic-version": ANTHROPIC_VERSION,
-        "content-type": "application/json",
-    }
-    payload = {
-        "model": os.environ.get("CLAWDMETER_MODEL", DEFAULT_MODEL),
-        "max_tokens": 1,
-        "messages": [{"role": "user", "content": "ping"}],
-    }
-
-    response = requests.post(ANTHROPIC_URL, headers=headers, json=payload, timeout=20)
-    if not 200 <= response.status_code < 300:
-        raise RuntimeError(f"Anthropic API returned HTTP {response.status_code}: {response.text[:300]}")
-
-    return {
-        "ok": True,
-        "sessionPercent": header_number(response, "anthropic-ratelimit-unified-5h-utilization", 0),
-        "sessionResetMinutes": header_minutes(response, "anthropic-ratelimit-unified-5h-reset"),
-        "weeklyPercent": header_number(response, "anthropic-ratelimit-unified-7d-utilization", 0),
-        "weeklyResetMinutes": header_minutes(response, "anthropic-ratelimit-unified-7d-reset"),
-        "status": "api",
-        "updatedAt": datetime.now(timezone.utc).isoformat(),
-        "source": "anthropic_api",
-    }
-
-
-def auth_headers() -> dict[str, str]:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if api_key:
-        return {"x-api-key": api_key.strip()}
-
-    token = load_access_token()
-    return {"authorization": f"Bearer {token}"}
-
-
-def load_access_token() -> str:
-    env_token = os.environ.get("CLAUDE_ACCESS_TOKEN") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-    if env_token:
-        return env_token.strip()
-
-    if not CREDENTIALS_PATH.exists():
-        raise RuntimeError(
-            "Claude Code credentials file was not found. On macOS, Claude Code often stores credentials "
-            "in the macOS Keychain, not in ~/.claude/.credentials.json. Use default --mode local for free "
-            "local estimates, or set ANTHROPIC_API_KEY and run --mode api."
-        )
-
-    data = json.loads(CREDENTIALS_PATH.read_text(encoding="utf-8"))
-    token = find_token(data)
-    if not token:
-        raise RuntimeError("Could not find an access token in ~/.claude/.credentials.json")
-    return token
-
-
-def find_token(value: Any) -> str | None:
-    if isinstance(value, dict):
-        preferred_keys = ["accessToken", "access_token", "claudeAiOauth/accessToken", "oauthAccessToken", "token"]
-        for key in preferred_keys:
-            candidate = value.get(key)
-            if isinstance(candidate, str) and len(candidate) > 20:
-                return candidate
-        for child in value.values():
-            found = find_token(child)
-            if found:
-                return found
-    elif isinstance(value, list):
-        for child in value:
-            found = find_token(child)
-            if found:
-                return found
-    elif isinstance(value, str) and looks_like_token(value):
-        return value
-    return None
-
-
-def looks_like_token(value: str) -> bool:
-    if len(value) < 30:
-        return False
-    lowered = value.lower()
-    if "token" in lowered and len(value) < 80:
-        return False
-    return bool(re.search(r"[A-Za-z0-9_-]{30,}", value))
 
 
 def header_value(response: Any, name: str) -> str | None:
@@ -322,21 +393,30 @@ def header_value(response: Any, name: str) -> str | None:
     return None
 
 
-def header_number(response: Any, name: str, default: int) -> int:
-    value = header_value(response, name)
-    if value is None:
-        return default
-    try:
-        return round(float(value))
-    except ValueError:
-        return default
+def first_header_number(response: Any, names: list[str], default: int) -> int:
+    for name in names:
+        value = header_value(response, name)
+        if value is None:
+            continue
+        try:
+            return max(0, min(100, round(float(value))))
+        except ValueError:
+            continue
+    return default
+
+
+def first_header_minutes(response: Any, names: list[str]) -> int | None:
+    for name in names:
+        minutes = header_minutes(response, name)
+        if minutes is not None:
+            return minutes
+    return None
 
 
 def header_minutes(response: Any, name: str) -> int | None:
     value = header_value(response, name)
     if not value:
         return None
-
     stripped = value.strip()
     try:
         numeric = float(stripped)
@@ -345,7 +425,6 @@ def header_minutes(response: Any, name: str) -> int | None:
         return round(numeric)
     except ValueError:
         pass
-
     try:
         reset_time = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
         delta_seconds = (reset_time - datetime.now(timezone.utc)).total_seconds()
@@ -355,23 +434,22 @@ def header_minutes(response: Any, name: str) -> int | None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ClawdmeterWeb/0.4"
+    server_version = "ClawdmeterWeb/1.0"
 
     def do_GET(self) -> None:
         if self.path == "/api/usage":
             self.send_usage()
             return
-        if self.path in ("/", "/index.html"):
-            self.send_static("index.html", "text/html; charset=utf-8")
-            return
-        if self.path == "/styles.css":
-            self.send_static("styles.css", "text/css; charset=utf-8")
-            return
-        if self.path == "/app.js":
-            self.send_static("app.js", "application/javascript; charset=utf-8")
-            return
-        if self.path == "/manifest.webmanifest":
-            self.send_static("manifest.webmanifest", "application/manifest+json; charset=utf-8")
+        routes = {
+            "/": ("index.html", "text/html; charset=utf-8"),
+            "/index.html": ("index.html", "text/html; charset=utf-8"),
+            "/styles.css": ("styles.css", "text/css; charset=utf-8"),
+            "/app.js": ("app.js", "application/javascript; charset=utf-8"),
+            "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json; charset=utf-8"),
+        }
+        if self.path in routes:
+            filename, content_type = routes[self.path]
+            self.send_static(filename, content_type)
             return
         if self.path == "/favicon.ico":
             self.send_response(204)
@@ -385,7 +463,7 @@ class Handler(BaseHTTPRequestHandler):
             status = 200
         except Exception as exc:
             print(f"/api/usage failed: {exc}", file=sys.stderr)
-            payload = {"ok": False, "error": str(exc), "updatedAt": datetime.now(timezone.utc).isoformat()}
+            payload = {"ok": False, "error": str(exc), "updatedAt": datetime.now(timezone.utc).isoformat(), "source": SERVER_MODE}
             status = 500
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
@@ -396,8 +474,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def send_static(self, filename: str, content_type: str) -> None:
-        path = STATIC_DIR / filename
-        body = path.read_bytes()
+        body = (STATIC_DIR / filename).read_bytes()
         self.send_response(200)
         self.send_header("content-type", content_type)
         self.send_header("cache-control", "no-cache")
@@ -411,19 +488,21 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     global SERVER_MODE
-
     parser = argparse.ArgumentParser(description="Run the Clawdmeter browser dashboard.")
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind. Use 0.0.0.0 for iPhone access on LAN.")
     parser.add_argument("--port", default=8787, type=int, help="Port to bind.")
-    parser.add_argument("--mode", choices=["local", "api"], default=os.environ.get("CLAWDMETER_MODE", "local"), help="local is free and reads Claude Code transcript files; api calls Anthropic API.")
+    parser.add_argument("--mode", choices=["official", "local", "api"], default=os.environ.get("CLAWDMETER_MODE", "official"), help="official uses Claude Code OAuth rate-limit headers; local is an estimate; api uses ANTHROPIC_API_KEY.")
     args = parser.parse_args()
     SERVER_MODE = args.mode
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"Clawdmeter Web is running at http://{args.host}:{args.port}")
     print(f"Mode: {SERVER_MODE}")
-    if SERVER_MODE == "local":
-        print("Using free local estimate from ~/.claude/projects and ~/.claude/sessions. No Anthropic API call will be made.")
+    if SERVER_MODE == "official":
+        print("Using Claude Code OAuth credentials and official Anthropic rate-limit headers.")
+        print("On macOS, allow Keychain access if prompted.")
+    elif SERVER_MODE == "local":
+        print("Using local estimate from ~/.claude/projects and ~/.claude/sessions. This will not match Claude's official limits.")
     print("Press Ctrl+C to stop.")
     try:
         httpd.serve_forever()
